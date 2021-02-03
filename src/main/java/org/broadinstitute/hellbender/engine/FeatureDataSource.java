@@ -20,10 +20,12 @@ import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.tools.IndexFeatureFile;
 import org.broadinstitute.hellbender.tools.genomicsdb.GenomicsDBConstants;
 import org.broadinstitute.hellbender.tools.genomicsdb.GenomicsDBOptions;
+import org.broadinstitute.hellbender.utils.CollatingInterval;
 import org.broadinstitute.hellbender.utils.IndexUtils;
 import org.broadinstitute.hellbender.utils.SimpleInterval;
 import org.broadinstitute.hellbender.utils.Utils;
 import org.broadinstitute.hellbender.utils.gcs.BucketUtils;
+import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.Reader;
 import org.broadinstitute.hellbender.utils.io.IOUtils;
 import org.genomicsdb.model.GenomicsDBExportConfiguration;
 import org.genomicsdb.reader.GenomicsDBFeatureReader;
@@ -42,6 +44,7 @@ import java.util.Optional;
 import java.util.function.Function;
 
 import static org.broadinstitute.hellbender.tools.genomicsdb.GenomicsDBUtils.createExportConfiguration;
+import static org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.BCI_FILE_EXTENSION;
 
 /**
  * Enables traversals and queries over sources of Features, which are metadata associated with a location
@@ -286,12 +289,13 @@ public final class FeatureDataSource<T extends Feature> implements GATKDataSourc
                 BucketUtils.getPrefetchingWrapper(cloudIndexPrefetchBuffer),
                 genomicsDBOptions);
 
-        if (IOUtils.isGenomicsDBPath(featureInput)) {
+        if (IOUtils.isGenomicsDBPath(featureInput) ||
+                featureInput.getFeaturePath().endsWith(BCI_FILE_EXTENSION)) {
             //genomics db uri's have no associated index file to read from, but they do support random access
             this.hasIndex = false;
             this.supportsRandomAccess = true;
         } else if (featureReader instanceof AbstractFeatureReader) {
-            this.hasIndex = ((AbstractFeatureReader<T, ?>) featureReader).hasIndex();
+            this.hasIndex = ((AbstractFeatureReader<T, ?>)featureReader).hasIndex();
             this.supportsRandomAccess = hasIndex;
         } else {
             throw new GATKException("Found a feature input that was neither GenomicsDB or a Tribble AbstractFeatureReader.  Input was " + featureInput.toString() + ".");
@@ -312,7 +316,7 @@ public final class FeatureDataSource<T extends Feature> implements GATKDataSourc
         queryCache.printCacheStatistics( getName() );
     }
 
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     private static <T extends Feature> FeatureReader<T> getFeatureReader(final FeatureInput<T> featureInput, final Class<? extends Feature> targetFeatureType,
                                                                          final Function<SeekableByteChannel, SeekableByteChannel> cloudWrapper,
                                                                          final Function<SeekableByteChannel, SeekableByteChannel> cloudIndexWrapper,
@@ -334,6 +338,9 @@ public final class FeatureDataSource<T extends Feature> implements GATKDataSourc
             }
         } else {
             final FeatureCodec<T, ?> codec = getCodecForFeatureInput(featureInput, targetFeatureType);
+            if ( featureInput.getFeaturePath().endsWith(BCI_FILE_EXTENSION) ) {
+                return new Reader(featureInput.getCachedPath(), codec);
+            }
             return getTribbleFeatureReader(featureInput, codec, cloudWrapper, cloudIndexWrapper);
         }
     }
@@ -422,7 +429,9 @@ public final class FeatureDataSource<T extends Feature> implements GATKDataSourc
     public SAMSequenceDictionary getSequenceDictionary() {
         SAMSequenceDictionary dict = null;
         final Object header = getHeader();
-        if (header instanceof VCFHeader) {
+        if ( header instanceof SAMSequenceDictionary ) {
+            dict = (SAMSequenceDictionary)header;
+        } else if (header instanceof VCFHeader) {
             dict = ((VCFHeader) header).getSequenceDictionary();
         }
         if (dict != null && !dict.isEmpty()) {
