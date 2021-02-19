@@ -339,7 +339,7 @@ public final class FeatureDataSource<T extends Feature> implements GATKDataSourc
         } else {
             final FeatureCodec<T, ?> codec = getCodecForFeatureInput(featureInput, targetFeatureType);
             if ( featureInput.getFeaturePath().endsWith(BCI_FILE_EXTENSION) ) {
-                return new Reader(featureInput.getCachedPath(), codec);
+                return new Reader(featureInput.toPath(), codec);
             }
             return getTribbleFeatureReader(featureInput, codec, cloudWrapper, cloudIndexWrapper);
         }

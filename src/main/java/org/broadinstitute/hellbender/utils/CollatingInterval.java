@@ -55,7 +55,7 @@ public class CollatingInterval implements Feature, Comparable<CollatingInterval>
     @Override public boolean overlaps( final Locatable that ) {
         return contigsMatch(that) && start <= that.getEnd() && that.getStart() <= end;
     }
-    @Override public boolean contains( Locatable that ) {
+    @Override public boolean contains( final Locatable that ) {
         return contigsMatch(that) && that.getStart() >= start && that.getEnd() <= end;
     }
     @Override public boolean contigsMatch( final Locatable that ) {
@@ -106,9 +106,7 @@ public class CollatingInterval implements Feature, Comparable<CollatingInterval>
             return true;
         }
         if ( thisContigId == thatContigId ) {
-            if ( end < that.getStart() ) {
-                return true;
-            }
+            return end < that.getStart();
         }
         return false;
     }
@@ -126,10 +124,9 @@ public class CollatingInterval implements Feature, Comparable<CollatingInterval>
         return interval2;
     }
 
-    public CollatingInterval write( final DataOutputStream dos ) throws IOException {
+    public void write( final DataOutputStream dos ) throws IOException {
         dos.writeInt(contig.getSequenceIndex());
         dos.writeInt(start);
         dos.writeInt(end);
-        return this;
     }
 }

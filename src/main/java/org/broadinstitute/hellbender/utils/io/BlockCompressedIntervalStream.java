@@ -86,7 +86,7 @@ public class BlockCompressedIntervalStream {
 
     @FunctionalInterface
     public interface WriteFunc<T extends CollatingInterval> {
-        T write( T tee, DataOutputStream dos ) throws IOException;
+        void write( T tee, DataOutputStream dos ) throws IOException;
     }
 
     // a class for writing arbitrary objects to a block compressed stream with a self-contained index
@@ -158,12 +158,11 @@ public class BlockCompressedIntervalStream {
             }
         }
 
-        public void write( final T tee ) {
+        public void write( final T interval ) {
             final long prevFilePosition = bcos.getPosition();
             // write the object, and make sure the order is OK (coordinate-sorted intervals)
-            final CollatingInterval interval;
             try {
-                interval = writeFunc.write(tee, dos);
+                writeFunc.write(interval, dos);
             } catch ( final IOException ioe ) {
                 throw new UserException("can't write to " + path, ioe);
             }

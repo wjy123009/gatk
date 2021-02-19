@@ -5,6 +5,7 @@ import htsjdk.tribble.Feature;
 import htsjdk.tribble.FeatureCodec;
 import htsjdk.tribble.FeatureCodecHeader;
 import org.broadinstitute.hellbender.exceptions.GATKException;
+import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.tools.walkers.sv.PairedEndAndSplitReadEvidenceCollection.LocusDepth;
 import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.Reader;
 
@@ -15,6 +16,8 @@ import static htsjdk.tribble.FeatureCodecHeader.EMPTY_HEADER;
 import static org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.BCI_FILE_EXTENSION;
 
 public class LocusDepthCodec implements FeatureCodec<LocusDepth, Reader<LocusDepth>> {
+    private boolean versionChecked = false;
+
     @Override
     public Feature decodeLoc( final Reader<LocusDepth> reader ) throws IOException {
         return decode(reader);
@@ -22,6 +25,13 @@ public class LocusDepthCodec implements FeatureCodec<LocusDepth, Reader<LocusDep
 
     @Override
     public LocusDepth decode( final Reader<LocusDepth> reader ) throws IOException {
+        if ( !versionChecked ) {
+            if ( !LocusDepth.BCI_VERSION.equals(reader.getVersion()) ) {
+                throw new UserException("bci file has wrong version: expected " +
+                        LocusDepth.BCI_VERSION + " but found " + reader.getVersion());
+            }
+            versionChecked = true;
+        }
         return new LocusDepth(reader.getDictionary(), reader.getStream());
     }
 

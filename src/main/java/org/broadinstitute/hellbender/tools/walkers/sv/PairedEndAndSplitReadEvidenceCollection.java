@@ -667,13 +667,12 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
         }
         public int getTotalDepth() { return totalDepth; }
 
-        public LocusDepth write( final DataOutputStream dos ) throws IOException {
+        public void write( final DataOutputStream dos ) throws IOException {
             super.write(dos);
             dos.writeByte(refIdx);
             dos.writeByte(altIdx);
             dos.writeInt(totalDepth);
             dos.writeInt(altDepth);
-            return this;
         }
 
         public String toString() {
