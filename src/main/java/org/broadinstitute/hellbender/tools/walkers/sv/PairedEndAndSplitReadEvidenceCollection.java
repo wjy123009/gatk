@@ -152,14 +152,16 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
 
     @Override
     public void apply(final GATKRead read, final ReferenceContext referenceContext, final FeatureContext featureContext) {
-        if ( read.isPaired() &&
-                !read.mateIsUnmapped() && !read.isProperlyPaired() &&
-                !read.isSupplementaryAlignment() && !read.isSecondaryAlignment() ) {
+        if ( !(read.isPaired() && read.mateIsUnmapped()) &&
+                !read.isSupplementaryAlignment() &&
+                !read.isSecondaryAlignment() ) {
             if ( isSoftClipped(read) ) {
                 countSplitRead(read, splitPosBuffer, srWriter);
             }
 
-            reportDiscordantReadPair(read);
+            if ( !read.isProperlyPaired() ) {
+                reportDiscordantReadPair(read);
+            }
         }
 
         if ( alleleCounter != null ) {
