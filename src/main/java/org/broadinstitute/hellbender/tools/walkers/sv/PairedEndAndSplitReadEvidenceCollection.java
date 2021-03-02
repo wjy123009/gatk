@@ -4,7 +4,10 @@ import com.google.common.annotations.VisibleForTesting;
 import htsjdk.samtools.CigarElement;
 import htsjdk.samtools.CigarOperator;
 import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.samtools.SAMSequenceRecord;
 import htsjdk.samtools.util.BlockCompressedOutputStream;
+import htsjdk.samtools.util.Locatable;
+import htsjdk.tribble.Feature;
 import htsjdk.variant.variantcontext.VariantContext;
 import org.broadinstitute.barclay.argparser.Argument;
 import org.broadinstitute.barclay.argparser.BetaFeature;
@@ -17,7 +20,9 @@ import org.broadinstitute.hellbender.exceptions.GATKException;
 import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.utils.CollatingInterval;
 import org.broadinstitute.hellbender.utils.Nucleotide;
-import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream;
+import org.broadinstitute.hellbender.utils.codecs.LocusDepthCodec;
+import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.Header;
+import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.Writer;
 import org.broadinstitute.hellbender.utils.read.GATKRead;
 
 import java.io.*;
@@ -496,7 +501,7 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
     @VisibleForTesting
     final static class AlleleCounter {
         private final SAMSequenceDictionary dict;
-        private final BlockCompressedIntervalStream.Writer<LocusDepth> writer;
+        private final Writer<LocusDepth> writer;
         private final int minMapQ;
         private final int minQ;
         private final Iterator<VariantContext> snpSourceItr;
@@ -508,8 +513,11 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
                               final int minMapQ,
                               final int minQ ) {
             this.dict = dict;
-            this.writer = new BlockCompressedIntervalStream.Writer<>(new GATKPath(outputFilename),
-                    dict, LocusDepth.class, LocusDepth.BCI_VERSION, LocusDepth::write);
+            final Header header =
+                    new Header(LocusDepth.class.getSimpleName(), LocusDepth.BCI_VERSION,
+                                dict, Collections.emptyList());
+            final LocusDepthCodec codec = new LocusDepthCodec();
+            this.writer = new Writer<>(new GATKPath(outputFilename), header, codec::encode);
             this.minMapQ = minMapQ;
             this.minQ = minQ;
             final FeatureDataSource<VariantContext> snpSource =
@@ -527,7 +535,12 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
 
             // clean queue of LocusCounts that precede the current read
             final CollatingInterval readInterval = new CollatingInterval(dict, read);
-            while ( locusDepthQueue.getFirst().compareTo(readInterval) < 0 ) {
+            while ( true ) {
+                final LocusDepth locusDepth = locusDepthQueue.getFirst();
+                final SAMSequenceRecord rec = locusDepth.getSequenceRecord();
+                if ( readInterval.compareLocus(rec, locusDepth.getStart()) >= 0 ) {
+                    break;
+                }
                 writer.write(locusDepthQueue.removeFirst());
                 if ( locusDepthQueue.isEmpty() ) {
                     if ( !readNextLocus() ) {
@@ -536,10 +549,13 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
                 }
             }
 
-            // make sure that the last LocusCount in the queue happens after the current read
+            // make sure that the last LocusCount in the queue occurs after the current read
             //  if such a LocusCount is available
-            while ( !readInterval.isUpstreamOf(locusDepthQueue.getLast()) ) {
-                if ( !readNextLocus() ) {
+            while ( true ) {
+                final LocusDepth locusDepth = locusDepthQueue.getLast();
+                final SAMSequenceRecord rec = locusDepth.getSequenceRecord();
+                if ( readInterval.compareLocus(rec, locusDepth.getStart()) > 0 ||
+                        !readNextLocus() ) {
                     break;
                 }
             }
@@ -552,19 +568,21 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
             int readIdx = 0;
             final byte[] calls = read.getBasesNoCopy();
             final byte[] quals = read.getBaseQualitiesNoCopy();
+            final SAMSequenceRecord contig = dict.getSequence(read.getContig());
             for ( final CigarElement cigEle : read.getCigar().getCigarElements() ) {
                 final int eleLen = cigEle.getLength();
                 final CigarOperator cigOp = cigEle.getOperator();
                 if ( cigOp.isAlignment() ) {
                     final int opEnd = opStart + eleLen - 1;
                     final CollatingInterval opInterval =
-                            new CollatingInterval(dict, read.getContig(), opStart, opEnd);
+                            new CollatingInterval(contig, opStart, opEnd);
                     for ( final LocusDepth locusDepth : locusDepthQueue ) {
-                        if ( opInterval.isUpstreamOf(locusDepth) ) {
+                        final SAMSequenceRecord locusContig = locusDepth.getSequenceRecord();
+                        final int cmp = opInterval.compareLocus(locusContig, locusDepth.getStart());
+                        if ( cmp > 0 ) {
                             break;
                         }
-                        if ( opInterval.overlaps(locusDepth) &&
-                                !isBaseInsideAdaptor(read, locusDepth.getStart()) ) {
+                        if ( cmp == 0 && !isBaseInsideAdaptor(read, locusDepth.getStart()) ) {
                             final int callIdx = readIdx + locusDepth.getStart() - opStart;
                             if ( quals[callIdx] < minQ ) {
                                 continue;
@@ -603,45 +621,46 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
                 }
                 snp = snpSourceItr.next();
             }
-            final String contig = snp.getContig();
-            final int position = snp.getStart();
             final byte[] refSeq = snp.getReference().getBases();
             final Nucleotide refCall = Nucleotide.decode(refSeq[0]);
             if ( !refCall.isStandard() ) {
                 throw new UserException("vcf contains a SNP with a non-standard reference base " +
-                        refCall + " at locus " + snp.getContig() + ":" + position);
+                        refCall + " at locus " + snp.getContig() + ":" + snp.getStart());
             }
             final byte[] altSeq = snp.getAlternateAllele(0).getBases();
             final Nucleotide altCall = Nucleotide.decode(altSeq[0]);
             if ( !altCall.isStandard() ) {
                 throw new UserException("vcf contains a SNP with a non-standard alt base" +
-                        altCall + " at locus " + snp.getContig() + ":" + position);
+                        altCall + " at locus " + snp.getContig() + ":" + snp.getStart());
             }
             final LocusDepth locusDepth =
-                    new LocusDepth(dict, contig, position, refCall.ordinal(), altCall.ordinal());
+                    new LocusDepth(dict, snp, refCall.ordinal(), altCall.ordinal());
             locusDepthQueue.add(locusDepth);
             return true;
         }
     }
 
     @VisibleForTesting
-    public final static class LocusDepth extends CollatingInterval {
+    public final static class LocusDepth implements Feature {
+        private final SAMSequenceRecord contig;
+        private final int position;
         private final int refIdx;
         private final int altIdx;
         private int totalDepth;
         private int altDepth;
         public final static String BCI_VERSION = "1.0";
 
-        public LocusDepth( final SAMSequenceDictionary dict, final String contig,
-                           final int position, final int refIdx, final int altIdx ) {
-            this(dict, contig, position, refIdx, altIdx, 0, 0);
+        public LocusDepth( final SAMSequenceDictionary dict, final Locatable loc,
+                           final int refIdx, final int altIdx ) {
+            this(dict, loc.getContig(), loc.getStart(), refIdx, altIdx, 0, 0);
         }
 
-        public LocusDepth( final SAMSequenceDictionary dict, final String contig,
-                           final int position,
+        public LocusDepth( final SAMSequenceDictionary dict,
+                           final String contigName, final int position,
                            final int refIdx, final int altIdx,
                            final int totalDepth, final int altDepth ) {
-            super(dict, contig, position, position);
+            this.contig = dict.getSequence(contigName);
+            this.position = position;
             this.refIdx = refIdx;
             this.altIdx = altIdx;
             this.totalDepth = totalDepth;
@@ -650,11 +669,12 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
 
         public LocusDepth( final SAMSequenceDictionary dict,
                            final DataInputStream dis ) throws IOException {
-            super(dict, dis);
-            this.refIdx = dis.readByte();
-            this.altIdx = dis.readByte();
-            this.totalDepth = dis.readInt();
-            this.altDepth = dis.readInt();
+            contig = dict.getSequence(dis.readInt());
+            position = dis.readInt();
+            refIdx = dis.readByte();
+            altIdx = dis.readByte();
+            totalDepth = dis.readInt();
+            altDepth = dis.readInt();
         }
 
         public void observe( final int idx ) {
@@ -662,15 +682,19 @@ public class PairedEndAndSplitReadEvidenceCollection extends ReadWalker {
             totalDepth += 1;
         }
 
+        public SAMSequenceRecord getSequenceRecord() { return contig; }
+        @Override public String getContig() { return contig.getSequenceName(); }
+        @Override public int getEnd() { return position; }
+        @Override public int getStart() { return position; }
+
         public int getRefIdx() { return refIdx; }
         public int getAltIdx() { return altIdx; }
-        public int getAltDepth() {
-            return altDepth;
-        }
+        public int getAltDepth() { return altDepth; }
         public int getTotalDepth() { return totalDepth; }
 
         public void write( final DataOutputStream dos ) throws IOException {
-            super.write(dos);
+            dos.writeInt(contig.getSequenceIndex());
+            dos.writeInt(position);
             dos.writeByte(refIdx);
             dos.writeByte(altIdx);
             dos.writeInt(totalDepth);

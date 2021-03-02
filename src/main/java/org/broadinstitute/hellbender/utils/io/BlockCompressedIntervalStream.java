@@ -9,6 +9,7 @@ import htsjdk.samtools.util.BlockCompressedInputStream;
 import htsjdk.samtools.util.BlockCompressedOutputStream;
 import htsjdk.samtools.util.BlockCompressedStreamConstants;
 import htsjdk.tribble.CloseableTribbleIterator;
+import htsjdk.tribble.Feature;
 import htsjdk.tribble.FeatureCodec;
 import htsjdk.tribble.FeatureReader;
 import org.broadinstitute.hellbender.engine.GATKPath;
@@ -17,7 +18,10 @@ import org.broadinstitute.hellbender.exceptions.UserException;
 import org.broadinstitute.hellbender.utils.CollatingInterval;
 import org.broadinstitute.hellbender.utils.collections.IntervalTree;
 
-import java.io.*;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.file.Path;
 import java.util.*;
 
@@ -68,10 +72,7 @@ public class BlockCompressedIntervalStream {
 
         public IndexEntry( final DataInputStream dis,
                            final SAMSequenceDictionary dict ) throws IOException {
-            final int contigId = dis.readInt();
-            final int start = dis.readInt();
-            final int end = dis.readInt();
-            this.interval = new CollatingInterval(dict.getSequence(contigId), start, end);
+            this.interval = new CollatingInterval(dict, dis);
             this.filePosition = dis.readLong();
         }
 
@@ -85,22 +86,42 @@ public class BlockCompressedIntervalStream {
     }
 
     @FunctionalInterface
-    public interface WriteFunc<T extends CollatingInterval> {
-        void write( T tee, DataOutputStream dos ) throws IOException;
+    public interface WriteFunc<T extends Feature> {
+        void write( T tee, Writer<T> writer ) throws IOException;
+    }
+
+    public static class Header {
+        private final String className;
+        private final String version;
+        private final SAMSequenceDictionary dictionary;
+        private final List<String> sampleNames;
+
+        public Header( final String className, final String version,
+                       final SAMSequenceDictionary dictionary, final List<String> sampleNames ) {
+            this.className = className;
+            this.version = version;
+            this.dictionary = dictionary;
+            this.sampleNames = sampleNames;
+        }
+        public String getClassName() { return className; }
+        public String getVersion() { return version; }
+        public SAMSequenceDictionary getDictionary() { return dictionary; }
+        public List<String> getSampleNames() { return sampleNames; }
     }
 
     // a class for writing arbitrary objects to a block compressed stream with a self-contained index
     // the only restriction is that you must supply a lambda that writes enough state to a DataOutputStream
     //   to allow you to reconstitute the object when you read it back in later AND you have to
     //   return an CollatingInterval so that we can do indexing.
-    public static class Writer <T extends CollatingInterval> {
+    public static class Writer <T extends Feature> {
         final GATKPath path;
         final SAMSequenceDictionary dict;
+        final Map<String, Integer> sampleMap;
         final WriteFunc<T> writeFunc;
         final OutputStream os;
         final BlockCompressedOutputStream bcos;
         final DataOutputStream dos;
-        CollatingInterval lastInterval;
+        Feature lastInterval;
         final List<IndexEntry> indexEntries;
         long blockFilePosition;
         String blockContig;
@@ -111,21 +132,22 @@ public class BlockCompressedIntervalStream {
         public final static int DEFAULT_COMPRESSION_LEVEL = 6;
 
         public Writer( final GATKPath path,
-                       final SAMSequenceDictionary dict,
-                       final Class<T> tClass,
-                       final String version,
+                       final Header header,
                        final WriteFunc<T> writeFunc ) {
-            this(path, dict, tClass, version, writeFunc, DEFAULT_COMPRESSION_LEVEL);
+            this(path, header, writeFunc, DEFAULT_COMPRESSION_LEVEL);
         }
 
         public Writer( final GATKPath path,
-                       final SAMSequenceDictionary dict,
-                       final Class<T> tClass,
-                       final String version,
+                       final Header header,
                        final WriteFunc<T> writeFunc,
                        final int compressionLevel ) {
             this.path = path;
-            this.dict = dict;
+            this.dict = header.getDictionary();
+            final List<String> sampleNames = header.getSampleNames();
+            this.sampleMap = new HashMap<>(sampleNames.size() * 3 / 2);
+            for ( final String sampleName : sampleNames ) {
+                sampleMap.put(sampleName, sampleMap.size());
+            }
             this.writeFunc = writeFunc;
             this.os = path.getOutputStream();
             this.bcos = new BlockCompressedOutputStream(os, (Path)null, compressionLevel);
@@ -133,41 +155,66 @@ public class BlockCompressedIntervalStream {
             this.lastInterval = null;
             this.indexEntries = new ArrayList<>();
             this.firstBlockMember = true;
-            writeClassAndVersion(tClass, version);
-            writeDictionary();
+            writeHeader(header);
         }
 
-        private void writeClassAndVersion( final Class<T> tClass, final String version ) {
+        private void writeHeader( final Header header ) {
             try {
-                dos.writeUTF(tClass.getSimpleName());
-                dos.writeUTF(version);
-            } catch ( final IOException ioe ) {
-                throw new UserException("can't write class and version to " + path, ioe);
-            }
-        }
-        private void writeDictionary() {
-            try {
-                dos.writeInt(dict.size());
-                for ( final SAMSequenceRecord rec : dict.getSequences() ) {
-                    dos.writeInt(rec.getSequenceLength());
-                    dos.writeUTF(rec.getSequenceName());
-                }
+                writeClassAndVersion(header.getClassName(), header.getVersion());
+                writeSamples(header.getSampleNames());
+                writeDictionary(header.getDictionary());
                 dos.flush();
             } catch ( final IOException ioe ) {
-                throw new UserException("can't write dictionary to " + path, ioe);
+                throw new UserException("can't write header to " + path, ioe);
             }
+        }
+
+        private void writeClassAndVersion( final String className, final String version )
+                throws IOException {
+            dos.writeUTF(className);
+            dos.writeUTF(version);
+        }
+
+        private void writeSamples( final List<String> sampleNames ) throws IOException {
+            dos.writeInt(sampleNames.size());
+            for ( final String sampleName : sampleNames ) {
+                dos.writeUTF(sampleName);
+            }
+        }
+
+        private void writeDictionary( final SAMSequenceDictionary dictionary ) throws IOException {
+            dos.writeInt(dictionary.size());
+            for ( final SAMSequenceRecord rec : dictionary.getSequences() ) {
+                dos.writeInt(rec.getSequenceLength());
+                dos.writeUTF(rec.getSequenceName());
+            }
+        }
+
+        public DataOutputStream getStream() { return dos; }
+
+        public int getSampleIndex( final String sampleName ) {
+            final Integer sampleIndex = sampleMap.get(sampleName);
+            if ( sampleIndex == null ) {
+                throw new UserException("can't find index for sampleName " + sampleName);
+            }
+            return sampleIndex;
+        }
+
+        public int getContigIndex( final String contigName ) {
+            final SAMSequenceRecord contig = dict.getSequence(contigName);
+            if ( contig == null ) {
+                throw new UserException("can't find contig name " + contigName);
+            }
+            return contig.getSequenceIndex();
         }
 
         public void write( final T interval ) {
             final long prevFilePosition = bcos.getPosition();
-            // write the object, and make sure the order is OK (coordinate-sorted intervals)
+            // write the object
             try {
-                writeFunc.write(interval, dos);
+                writeFunc.write(interval, this);
             } catch ( final IOException ioe ) {
                 throw new UserException("can't write to " + path, ioe);
-            }
-            if ( lastInterval != null && interval.compareTo(lastInterval) < 0 ) {
-                throw new UserException("intervals are not coordinate sorted");
             }
 
             // if this is the first interval we've seen in a block, just capture the block-start data
@@ -229,7 +276,7 @@ public class BlockCompressedIntervalStream {
             }
         }
 
-        private void startBlock( final long filePosition, final CollatingInterval interval ) {
+        private void startBlock( final long filePosition, final T interval ) {
             blockFilePosition = filePosition;
             lastInterval = interval;
             blockContig = interval.getContig();
@@ -248,15 +295,13 @@ public class BlockCompressedIntervalStream {
     // a class for reading arbitrary objects from a block compressed stream with a self-contained index
     // the only restriction is that you must supply a lambda that reads from a DataInputStream
     //   to reconstitute the object.
-    public static final class Reader <T extends CollatingInterval> implements FeatureReader<T> {
+    public static final class Reader <T extends Feature> implements FeatureReader<T> {
         final Path path;
         final FeatureCodec<T, Reader<T>> codec;
         final long indexFilePointer;
         final BlockCompressedInputStream bcis;
         final DataInputStream dis;
-        final String className;
-        final String version;
-        final SAMSequenceDictionary dict;
+        final Header header;
         final long dataFilePointer;
         IntervalTree<Long> index;
 
@@ -272,19 +317,14 @@ public class BlockCompressedIntervalStream {
             this.indexFilePointer = findIndexFilePointer(sps);
             this.bcis = new BlockCompressedInputStream(new SeekableBufferedStream(sps));
             this.dis = new DataInputStream(bcis);
-            try {
-                this.className = dis.readUTF();
-                this.version = dis.readUTF();
-            } catch ( final IOException ioe ) {
-                throw new UserException("can't read class and version from " + path, ioe);
-            }
+            this.header = readHeader();
+            this.dataFilePointer = bcis.getPosition(); // having read header, we're pointing at the data
+            this.index = null;
             final String expectedClassName = codec.getFeatureType().getSimpleName();
-            if ( !className.equals(expectedClassName) ) {
+            if ( !header.getClassName().equals(expectedClassName) ) {
                 throw new UserException("can't use " + path + " to read " + expectedClassName +
-                        " features -- it contains " + className + " features");
+                        " features -- it contains " + header.getClassName() + " features");
             }
-            this.dict = readDictionary(dis);
-            this.dataFilePointer = bcis.getPosition(); // having read dictionary, we're pointing at the data
         }
 
         public Reader( final Reader<T> reader ) {
@@ -298,16 +338,15 @@ public class BlockCompressedIntervalStream {
                 throw new UserException("unable to clone stream for " + path, ioe);
             }
             this.dis = new DataInputStream(bcis);
-            this.className = reader.className;
-            this.version = reader.version;
-            this.dict = reader.dict;
+            this.header = reader.header;
             this.dataFilePointer = reader.dataFilePointer;
             this.index = reader.index;
         }
 
-        public SAMSequenceDictionary getDictionary() { return dict; }
         public DataInputStream getStream() { return dis; }
-        public String getVersion() { return version; }
+        public List<String> getSampleNames() { return header.getSampleNames(); }
+        public SAMSequenceDictionary getDictionary() { return header.getDictionary(); }
+        public String getVersion() { return header.getVersion(); }
 
         public boolean hasNext() {
             final long position = bcis.getPosition();
@@ -322,7 +361,8 @@ public class BlockCompressedIntervalStream {
                 loadIndex(bcis);
                 close();
             }
-            final CollatingInterval interval = new CollatingInterval(dict, chr, start, end);
+            final CollatingInterval interval =
+                    new CollatingInterval(getDictionary(), chr, start, end);
             return new OverlapIterator<>(interval, new Reader<>(this));
         }
 
@@ -339,6 +379,7 @@ public class BlockCompressedIntervalStream {
         }
 
         @Override public List<String> getSequenceNames() {
+            final SAMSequenceDictionary dict = getDictionary();
             final List<String> names = new ArrayList<>(dict.size());
             for ( final SAMSequenceRecord rec : dict.getSequences() ) {
                 names.add(rec.getSequenceName());
@@ -346,9 +387,11 @@ public class BlockCompressedIntervalStream {
             return names;
         }
 
-        @Override public Object getHeader() { return dict; }
+        @Override public Object getHeader() { return header; }
 
         @Override public boolean isQueryable() { return true; }
+
+        public long getPosition() { return bcis.getPosition(); }
 
         public void seekStream( final long filePointer ) {
             try {
@@ -397,19 +440,36 @@ public class BlockCompressedIntervalStream {
             return indexFilePointer;
         }
 
-        private SAMSequenceDictionary readDictionary( final DataInputStream dis ) {
+        private Header readHeader() {
             try {
-                final int nRecs = dis.readInt();
-                final List<SAMSequenceRecord> seqRecs = new ArrayList<>(nRecs);
-                for ( int idx = 0; idx != nRecs; ++idx ) {
-                    final int contigSize = dis.readInt();
-                    final String contigName = dis.readUTF();
-                    seqRecs.add(new SAMSequenceRecord(contigName, contigSize));
-                }
-                return new SAMSequenceDictionary(seqRecs);
+                final String className = dis.readUTF();
+                final String version = dis.readUTF();
+                final List<String> sampleNames = readSampleNames(dis);
+                final SAMSequenceDictionary dictionary = readDictionary(dis);
+                return new Header(className, version, dictionary, sampleNames);
             } catch ( final IOException ioe ) {
-                throw new UserException("unable to read dictionary from " + path, ioe);
+                throw new UserException("can't read header from " + path, ioe);
             }
+        }
+
+        private List<String> readSampleNames( final DataInputStream dis ) throws IOException {
+            final int nSamples = dis.readInt();
+            final List<String> sampleNames = new ArrayList<>(nSamples);
+            for ( int sampleId = 0; sampleId < nSamples; ++sampleId ) {
+                sampleNames.add(dis.readUTF());
+            }
+            return sampleNames;
+        }
+
+        private SAMSequenceDictionary readDictionary( final DataInputStream dis ) throws IOException {
+            final int nRecs = dis.readInt();
+            final List<SAMSequenceRecord> seqRecs = new ArrayList<>(nRecs);
+            for ( int idx = 0; idx != nRecs; ++idx ) {
+                final int contigSize = dis.readInt();
+                final String contigName = dis.readUTF();
+                seqRecs.add(new SAMSequenceRecord(contigName, contigSize));
+            }
+            return new SAMSequenceDictionary(seqRecs);
         }
 
         private void loadIndex( final BlockCompressedInputStream bcis ) {
@@ -417,6 +477,7 @@ public class BlockCompressedIntervalStream {
             try {
                 bcis.seek(indexFilePointer);
                 final DataInputStream dis = new DataInputStream(bcis);
+                final SAMSequenceDictionary dict = getDictionary();
                 int nEntries = dis.readInt();
                 while ( nEntries-- > 0 ) {
                     final IndexEntry entry = new IndexEntry(dis, dict);
@@ -429,7 +490,7 @@ public class BlockCompressedIntervalStream {
             index = intervalTree;
         }
 
-        private static class CompleteIterator <T extends CollatingInterval>
+        private static class CompleteIterator <T extends Feature>
                 implements CloseableTribbleIterator<T> {
             final Reader<T> reader;
             public CompleteIterator( final Reader<T> reader ) {
@@ -455,7 +516,7 @@ public class BlockCompressedIntervalStream {
             @Override public void close() { reader.close(); }
         }
         // find all the objects in the stream inflating just those blocks that might have relevant objects
-        private static class OverlapIterator <T extends CollatingInterval>
+        private static class OverlapIterator <T extends Feature>
                 implements CloseableTribbleIterator<T> {
             final CollatingInterval interval;
             final Reader<T> reader;
@@ -489,7 +550,7 @@ public class BlockCompressedIntervalStream {
 
             private void advance() {
                 do {
-                    if ( isNewBlock(blockStartPosition, reader.bcis.getPosition()) ) {
+                    if ( isNewBlock(blockStartPosition, reader.getPosition()) ) {
                         if ( !indexEntryIterator.hasNext() ) {
                             nextT = null;
                             return;
@@ -498,7 +559,7 @@ public class BlockCompressedIntervalStream {
                         reader.seekStream(blockStartPosition);
                     }
                     nextT = reader.readStream();
-                    if ( interval.isUpstreamOf(nextT) ) {
+                    if ( !interval.contigsMatch(nextT) || interval.getEnd() < nextT.getStart() ) {
                         nextT = null;
                         return;
                     }

@@ -1,27 +1,16 @@
 package org.broadinstitute.hellbender.utils.codecs;
 
-import htsjdk.samtools.util.LocationAware;
-import htsjdk.tribble.Feature;
-import htsjdk.tribble.FeatureCodec;
-import htsjdk.tribble.FeatureCodecHeader;
-import org.broadinstitute.hellbender.exceptions.GATKException;
 import org.broadinstitute.hellbender.exceptions.UserException;
+import org.broadinstitute.hellbender.tools.sv.BafEvidence;
 import org.broadinstitute.hellbender.tools.walkers.sv.PairedEndAndSplitReadEvidenceCollection.LocusDepth;
 import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.Reader;
+import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.Writer;
 
 import java.io.IOException;
-import java.io.InputStream;
 
-import static htsjdk.tribble.FeatureCodecHeader.EMPTY_HEADER;
-import static org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.BCI_FILE_EXTENSION;
-
-public class LocusDepthCodec implements FeatureCodec<LocusDepth, Reader<LocusDepth>> {
+public class LocusDepthCodec extends AbstractBCICodec<LocusDepth> {
     private boolean versionChecked = false;
-
-    @Override
-    public Feature decodeLoc( final Reader<LocusDepth> reader ) throws IOException {
-        return decode(reader);
-    }
+    private static final String LD_BCI_FILE_EXTENSION = ".ld.bci";
 
     @Override
     public LocusDepth decode( final Reader<LocusDepth> reader ) throws IOException {
@@ -36,29 +25,15 @@ public class LocusDepthCodec implements FeatureCodec<LocusDepth, Reader<LocusDep
     }
 
     @Override
-    public FeatureCodecHeader readHeader( final Reader<LocusDepth> reader ) throws IOException {
-        return EMPTY_HEADER;
-    }
-
-    @Override
     public Class<LocusDepth> getFeatureType() { return LocusDepth.class; }
 
     @Override
-    public Reader<LocusDepth> makeSourceFromStream( final InputStream is ) {
-        throw new GATKException("wasn't expecting to execute this code path");
+    public boolean canDecode( final String path ) { return path.endsWith(LD_BCI_FILE_EXTENSION); }
+
+    public void encode( final LocusDepth locusDepth, final Writer<LocusDepth> writer )
+            throws IOException {
+        locusDepth.write(writer.getStream());
     }
 
-    @Override
-    public LocationAware makeIndexableSourceFromStream( final InputStream is ) {
-        throw new GATKException("wasn't expecting to execute this code path");
-    }
-
-    @Override
-    public boolean isDone( final Reader<LocusDepth> reader ) { return !reader.hasNext(); }
-
-    @Override
-    public void close( final Reader<LocusDepth> reader ) { reader.close(); }
-
-    @Override
-    public boolean canDecode( final String path ) { return path.endsWith(BCI_FILE_EXTENSION); }
+    public String getVersion() { return LocusDepth.BCI_VERSION; }
 }

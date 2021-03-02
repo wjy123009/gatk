@@ -9,44 +9,42 @@ import org.broadinstitute.hellbender.exceptions.GATKException;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.util.function.Supplier;
 
 public class CollatingInterval implements Feature, Comparable<CollatingInterval> {
     private final SAMSequenceRecord contig;
     private final int start;
     private final int end;
 
+    public CollatingInterval( final SAMSequenceDictionary dict, final Locatable loc ) {
+        contig = dict.getSequence(loc.getContig());
+        start = loc.getStart();
+        end = loc.getEnd();
+        validate(() -> loc.getContig() + " not in dictionary");
+    }
+
     public CollatingInterval( final SAMSequenceDictionary dict, final String contigName,
                               final int start, final int end ) {
-        this(Utils.nonNull(dict.getSequence(contigName), () -> contigName + " not in dictionary"),
-                start, end);
+        this.contig = dict.getSequence(contigName);
+        this.start = start;
+        this.end = end;
+        validate(() -> contigName + " not in dictionary");
     }
 
     public CollatingInterval( final SAMSequenceRecord contig, final int start, final int end ) {
-        if ( contig == null ) {
-            throw new GATKException("null contig supplied");
-        }
-        final int sequenceLength = contig.getSequenceLength();
-        if ( start < 1 || start > sequenceLength ) {
-            throw new GATKException("starting coordinate " + start + " is not within contig bounds");
-        }
-        if ( end < start || end > sequenceLength ) {
-            throw new GATKException("ending coordinate " + end +
-                    " is less than start or greater than contig length");
-        }
         this.contig = contig;
         this.start = start;
         this.end = end;
+        validate(() -> "null contig");
     }
 
-    public CollatingInterval( final SAMSequenceDictionary dict, final Locatable loc ) {
-        this.contig = dict.getSequence(loc.getContig());
-        this.start = loc.getStart();
-        this.end = loc.getEnd();
-    }
-
-    public CollatingInterval( final SAMSequenceDictionary dict,
-                              final DataInputStream dis ) throws IOException {
-        this(dict.getSequence(dis.readInt()), dis.readInt(), dis.readInt());
+    public CollatingInterval( final SAMSequenceDictionary dict, final DataInputStream dis )
+        throws IOException {
+        final int contigId = dis.readInt();
+        contig = dict.getSequence(contigId);
+        start = dis.readInt();
+        end = dis.readInt();
+        validate(() -> "dictionary does not contain a contig with id " + contigId);
     }
 
     @Override public String getContig() { return contig.getSequenceName(); }
@@ -59,20 +57,15 @@ public class CollatingInterval implements Feature, Comparable<CollatingInterval>
         return contigsMatch(that) && that.getStart() >= start && that.getEnd() <= end;
     }
     @Override public boolean contigsMatch( final Locatable that ) {
-        return contig.getSequenceName().equals(that.getContig());
+        final String thisContig = contig.getSequenceName();
+        final String thatContig = that.getContig();
+        return thisContig == thatContig || thisContig.equals(thatContig);
     }
 
-    public boolean overlaps( final CollatingInterval that ) {
-        return contigsMatch(that) && this.start <= that.end && that.start <= this.end;
-    }
-    public boolean contains( final CollatingInterval that ) {
-        return contigsMatch(that) && that.start >= this.start && that.end <= this.end;
-    }
-    public boolean contigsMatch( final CollatingInterval that ) {
-        return this.contig == that.contig ||
-                this.contig.getSequenceIndex() == that.contig.getSequenceIndex();
-    }
-
+    /**
+     * Compares contig, start, and stop, in that order.
+     * The contig comparison is done relative to some dictionary's order.
+     */
     @Override public int compareTo( final CollatingInterval that ) {
         int result = Integer.compare(this.contig.getSequenceIndex(), that.contig.getSequenceIndex());
         if ( result == 0 ) {
@@ -99,6 +92,30 @@ public class CollatingInterval implements Feature, Comparable<CollatingInterval>
         return contig.getSequenceName() + ":" + start + "-" + end;
     }
 
+    /**
+     * Returns a value less than 0 for a locus earlier in the genome than any in this interval,
+     * the value 0 for a locus that overlaps this interval,
+     * and a value greater than 0 for a locus later than any any in this interval.
+     */
+    public int compareLocus( final SAMSequenceRecord thatContig, final int thatPosition ) {
+        int result = Integer.compare(thatContig.getSequenceIndex(), contig.getSequenceIndex());
+        if ( result != 0 ) {
+            return result;
+        }
+        if ( thatPosition < start ) {
+            return -1;
+        }
+        if ( thatPosition > end ) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * Upstream means not overlapping, and
+     * 1) this is on an earlier (relative to some dictionary's order) contig than that, or
+     * 2) if on the same contig, this ends earlier than that starts
+     */
     public boolean isUpstreamOf( final CollatingInterval that ) {
         final int thisContigId = contig.getSequenceIndex();
         final int thatContigId = that.contig.getSequenceIndex();
@@ -111,6 +128,11 @@ public class CollatingInterval implements Feature, Comparable<CollatingInterval>
         return false;
     }
 
+    /**
+     * If the contigs are not the same, the laterEnding interval is the one with the later (relative
+     * to some dictionary) contig.
+     * If the contigs are the same, the laterEnding interval is the one with the greater end position.
+     */
     public static CollatingInterval laterEnding( final CollatingInterval interval1,
                                                  final CollatingInterval interval2 ) {
         final int contigId1 = interval1.contig.getSequenceIndex();
@@ -128,5 +150,19 @@ public class CollatingInterval implements Feature, Comparable<CollatingInterval>
         dos.writeInt(contig.getSequenceIndex());
         dos.writeInt(start);
         dos.writeInt(end);
+    }
+
+    private void validate( final Supplier<String> badContigMessage ) {
+        if ( contig == null ) {
+            throw new GATKException(badContigMessage.get());
+        }
+        final int sequenceLength = contig.getSequenceLength();
+        if ( start < 1 || start > sequenceLength ) {
+            throw new GATKException("starting coordinate " + start + " is not within contig bounds");
+        }
+        if ( end < start || end > sequenceLength ) {
+            throw new GATKException("ending coordinate " + end +
+                    " is less than start or greater than contig length");
+        }
     }
 }
