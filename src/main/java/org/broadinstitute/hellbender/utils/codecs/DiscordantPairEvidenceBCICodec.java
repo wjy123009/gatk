@@ -53,7 +53,7 @@ public class DiscordantPairEvidenceBCICodec extends AbstractBCICodec<DiscordantP
         dos.writeInt(peEvidence.getStart());
         dos.writeBoolean(peEvidence.getStartStrand());
         dos.writeInt(writer.getContigIndex(peEvidence.getEndContig()));
-        dos.writeInt(peEvidence.getEnd());
+        dos.writeInt(peEvidence.getEndPosition());
         dos.writeBoolean(peEvidence.getEndStrand());
     }
 

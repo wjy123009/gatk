@@ -15,6 +15,7 @@ import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.Head
 import org.broadinstitute.hellbender.utils.io.BlockCompressedIntervalStream.Writer;
 import org.broadinstitute.hellbender.utils.io.FeatureOutputStream;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
@@ -94,7 +95,7 @@ public final class PrintSVEvidence extends FeatureWalker<Feature> {
     private int compressionLevel = 4;
 
     @Argument(doc = "List of sample names", fullName = "sample-names", optional = true)
-    private List<String> sampleNames = Collections.emptyList();
+    private List<String> sampleNames = new ArrayList<>();
 
     @SuppressWarnings("rawtypes")
     private FeatureOutputStream foStream;
@@ -102,6 +103,18 @@ public final class PrintSVEvidence extends FeatureWalker<Feature> {
     private Writer bciWriter;
     private FeatureCodec<? extends Feature, ?> featureCodec;
     private Class<? extends Feature> evidenceClass;
+
+    private static final List<FeatureCodec<? extends Feature, ?>> outputCodecs = new ArrayList<>(8);
+    static {
+        outputCodecs.add(new BafEvidenceCodec());
+        outputCodecs.add(new DepthEvidenceCodec());
+        outputCodecs.add(new DiscordantPairEvidenceCodec());
+        outputCodecs.add(new SplitReadEvidenceCodec());
+        outputCodecs.add(new BafEvidenceBCICodec());
+        outputCodecs.add(new DepthEvidenceBCICodec());
+        outputCodecs.add(new DiscordantPairEvidenceBCICodec());
+        outputCodecs.add(new SplitReadEvidenceBCICodec());
+    }
 
     @Override
     protected boolean isAcceptableFeatureType(final Class<? extends Feature> featureType) {
@@ -122,9 +135,18 @@ public final class PrintSVEvidence extends FeatureWalker<Feature> {
         initializeOutput();
     }
 
+    private static FeatureCodec<? extends Feature, ?> findOutputCodec( final GATKPath outputFilePath ) {
+        final String outputFileName = outputFilePath.toString();
+        for ( final FeatureCodec<? extends Feature, ?> codec : outputCodecs ) {
+            if ( codec.canDecode(outputFileName) ) {
+                return codec;
+            }
+        }
+        throw new UserException("no codec found for path " + outputFileName);
+    }
+
     private void initializeOutput() {
-        final FeatureCodec<? extends Feature, ?> outputCodec =
-                FeatureManager.getCodecForFile(outputFilePath.toPath());
+        final FeatureCodec<? extends Feature, ?> outputCodec = findOutputCodec(outputFilePath);
         final Class<? extends Feature> outputClass = outputCodec.getFeatureType();
         if ( evidenceClass != outputClass ) {
             throw new UserException("input file contains " + evidenceClass.getSimpleName() +
@@ -167,6 +189,9 @@ public final class PrintSVEvidence extends FeatureWalker<Feature> {
     private void writeHeader() {
         final Object header = getDrivingFeaturesHeader();
         if (header != null) {
+            if ( header instanceof Header ) {
+                return;
+            }
             if (header instanceof String) {
                 foStream.writeHeader((String) header);
             } else {
